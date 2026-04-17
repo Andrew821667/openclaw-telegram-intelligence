@@ -137,12 +137,34 @@ def cmd_scopes() -> None:
     for name, chat_ids in SCOPES.items():
         print(f"{name}: {', '.join(str(x) for x in chat_ids)}")
 
+def cmd_scope_info(scope: str) -> None:
+    chat_ids = get_scope_chat_ids(scope)
+    conn = get_db()
+
+    placeholders = ",".join("?" for _ in chat_ids)
+    sql = f"""
+        SELECT chat_id, archived, chat_type, title, last_message_at
+        FROM tg_chats
+        WHERE chat_id IN ({placeholders})
+        ORDER BY title
+    """
+
+    rows = conn.execute(sql, chat_ids).fetchall()
+
+    for chat_id, archived, chat_type, title, last_message_at in rows:
+        print(f"{chat_id}\tarchived={archived}\ttype={chat_type}\t{title}\t{last_message_at}")
+
+    conn.close()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scopes_parser = subparsers.add_parser("scopes")
+
+    scope_info_parser = subparsers.add_parser("scope-info")
+    scope_info_parser.add_argument("--scope", default="legal_ai")
 
     sync_parser = subparsers.add_parser("sync")
     sync_parser.add_argument("--scope", default="legal_ai")
@@ -164,6 +186,8 @@ def main() -> None:
 
     if args.command == "scopes":
         cmd_scopes()
+    elif args.command == "scope-info":
+        cmd_scope_info(args.scope)
     elif args.command == "sync":
         cmd_sync(args.scope, args.limit)
     elif args.command == "summary":
