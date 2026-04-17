@@ -69,25 +69,7 @@ def format_record_markdown(header: str, body: str) -> list[str]:
     return [f"### {header}", "", body, ""]
 
 
-def cmd_sync(scope: str, limit: int) -> None:
-    chat_ids = get_scope_chat_ids(scope)
-    for chat_id in chat_ids:
-        print(f"=== SYNC scope={scope} chat_id={chat_id} ===")
-        result = subprocess.run(
-            [
-                sys.executable,
-                "src/sync_messages.py",
-                "--chat-id",
-                str(chat_id),
-                "--limit",
-                str(limit),
-            ]
-        )
-        if result.returncode != 0:
-            raise SystemExit(result.returncode)
-
-
-def cmd_summary(scope: str, days: int, limit: int, skip_english: bool, fmt: str, output: str | None) -> None:
+def fetch_scope_rows(scope: str, days: int, row_limit: int = 500):
     chat_ids = get_scope_chat_ids(scope)
     conn = get_db()
 
@@ -107,10 +89,34 @@ def cmd_summary(scope: str, days: int, limit: int, skip_english: bool, fmt: str,
         WHERE m.chat_id IN ({placeholders})
           AND m.date_utc >= ?
         ORDER BY m.date_utc DESC
-        LIMIT 300
+        LIMIT ?
     """
 
-    rows = conn.execute(sql, (*chat_ids, since)).fetchall()
+    rows = conn.execute(sql, (*chat_ids, since, row_limit)).fetchall()
+    conn.close()
+    return rows
+
+
+def cmd_sync(scope: str, limit: int) -> None:
+    chat_ids = get_scope_chat_ids(scope)
+    for chat_id in chat_ids:
+        print(f"=== SYNC scope={scope} chat_id={chat_id} ===")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "src/sync_messages.py",
+                "--chat-id",
+                str(chat_id),
+                "--limit",
+                str(limit),
+            ]
+        )
+        if result.returncode != 0:
+            raise SystemExit(result.returncode)
+
+
+def cmd_summary(scope: str, days: int, limit: int, skip_english: bool, fmt: str, output: str | None) -> None:
+    rows = fetch_scope_rows(scope, days, 300)
 
     seen = set()
     kept = 0
@@ -145,7 +151,6 @@ def cmd_summary(scope: str, days: int, limit: int, skip_english: bool, fmt: str,
         if kept >= limit:
             break
 
-    conn.close()
     emit_output(lines, output)
 
 
@@ -177,6 +182,7 @@ def cmd_search(scope: str, query: str, days: int, limit: int, fmt: str, output: 
     """
 
     rows = conn.execute(sql, (query, *chat_ids, since, limit)).fetchall()
+    conn.close()
     lines: list[str] = []
 
     if fmt == "markdown":
@@ -195,34 +201,11 @@ def cmd_search(scope: str, query: str, days: int, limit: int, fmt: str, output: 
         else:
             lines.extend(format_record_terminal(header, body))
 
-    conn.close()
     emit_output(lines, output)
 
 
 def cmd_digest(scope: str, days: int, limit: int, fmt: str, output: str | None) -> None:
-    chat_ids = get_scope_chat_ids(scope)
-    conn = get_db()
-
-    since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-    placeholders = ",".join("?" for _ in chat_ids)
-
-    sql = f"""
-        SELECT
-            c.title,
-            m.date_utc,
-            coalesce(m.text, '') as text
-        FROM tg_messages m
-        JOIN tg_chats c
-          ON c.chat_id = m.chat_id
-        WHERE m.chat_id IN ({placeholders})
-          AND m.date_utc >= ?
-        ORDER BY m.date_utc DESC
-        LIMIT 500
-    """
-
-    rows = conn.execute(sql, (*chat_ids, since)).fetchall()
-    conn.close()
-
+    rows = fetch_scope_rows(scope, days, 500)
     lines: list[str] = []
 
     if not rows:
@@ -234,7 +217,7 @@ def cmd_digest(scope: str, days: int, limit: int, fmt: str, output: str | None) 
     unique_previews: list[tuple[str, str, str]] = []
     seen = set()
 
-    for title, date_utc, text in rows:
+    for title, _chat_id, _message_id, date_utc, text in rows:
         chat_counter[title] += 1
         topic_counter.update(tokenize(text))
 
@@ -289,6 +272,73 @@ def cmd_digest(scope: str, days: int, limit: int, fmt: str, output: str | None) 
     emit_output(lines, output)
 
 
+def cmd_brief(scope: str, days: int, limit: int, fmt: str, output: str | None) -> None:
+    rows = fetch_scope_rows(scope, days, 500)
+    lines: list[str] = []
+
+    if not rows:
+        emit_output(["Нет данных за указанный период."], output)
+        return
+
+    topic_counter = Counter()
+    unique_items: list[tuple[str, str, str]] = []
+    seen = set()
+
+    for title, _chat_id, _message_id, date_utc, text in rows:
+        topic_counter.update(tokenize(text))
+        norm = normalize(text)
+        if norm and norm not in seen:
+            seen.add(norm)
+            preview = " ".join((text or "").replace("\n", " ").split()).strip()[:260]
+            unique_items.append((date_utc, title, preview))
+
+    top_topics = [word for word, _count in topic_counter.most_common(6)]
+
+    if fmt == "markdown":
+        lines.append(f"# Brief for scope `{scope}`")
+        lines.append("")
+        lines.append(f"- Period: last {days} days")
+        lines.append(f"- Messages scanned: {len(rows)}")
+        lines.append("")
+        lines.append("## Главное")
+        lines.append("")
+        if top_topics:
+            lines.append("За период чаще всего повторялись темы: " + ", ".join(top_topics) + ".")
+        else:
+            lines.append("Явные повторяющиеся темы не выделились.")
+        lines.append("")
+        lines.append("## Что нового")
+        lines.append("")
+        for date_utc, title, preview in unique_items[:limit]:
+            lines.append(f"- [{date_utc}] {title}: {preview}")
+        lines.append("")
+        lines.append("## Что посмотреть")
+        lines.append("")
+        for word in top_topics[:3]:
+            lines.append(f"- Проверить тему: {word}")
+    else:
+        lines.append(f"Brief for scope: {scope}")
+        lines.append(f"Period: last {days} days")
+        lines.append(f"Messages scanned: {len(rows)}")
+        lines.append("")
+        lines.append("Главное:")
+        if top_topics:
+            lines.append("- За период чаще всего повторялись темы: " + ", ".join(top_topics) + ".")
+        else:
+            lines.append("- Явные повторяющиеся темы не выделились.")
+        lines.append("")
+        lines.append("Что нового:")
+        for date_utc, title, preview in unique_items[:limit]:
+            lines.append(f"- [{date_utc}] {title}")
+            lines.append(f"  {preview}")
+        lines.append("")
+        lines.append("Что посмотреть:")
+        for word in top_topics[:3]:
+            lines.append(f"- {word}")
+
+    emit_output(lines, output)
+
+
 def cmd_scopes() -> None:
     for name, chat_ids in SCOPES.items():
         print(f"{name}: {', '.join(str(x) for x in chat_ids)}")
@@ -307,11 +357,10 @@ def cmd_scope_info(scope: str) -> None:
     """
 
     rows = conn.execute(sql, chat_ids).fetchall()
+    conn.close()
 
     for chat_id, archived, chat_type, title, last_message_at in rows:
         print(f"{chat_id}\tarchived={archived}\ttype={chat_type}\t{title}\t{last_message_at}")
-
-    conn.close()
 
 
 def main() -> None:
@@ -350,6 +399,13 @@ def main() -> None:
     digest_parser.add_argument("--format", choices=["terminal", "markdown"], default="terminal")
     digest_parser.add_argument("--output")
 
+    brief_parser = subparsers.add_parser("brief")
+    brief_parser.add_argument("--scope", default="legal_ai")
+    brief_parser.add_argument("--days", type=int, default=14)
+    brief_parser.add_argument("--limit", type=int, default=5)
+    brief_parser.add_argument("--format", choices=["terminal", "markdown"], default="terminal")
+    brief_parser.add_argument("--output")
+
     add_scope_parser = subparsers.add_parser("add-scope")
     add_scope_parser.add_argument("--scope", required=True)
     add_scope_parser.add_argument("--chat-id", dest="chat_ids", action="append", type=int, required=True)
@@ -379,6 +435,8 @@ def main() -> None:
         cmd_search(args.scope, args.query, args.days, args.limit, args.format, args.output)
     elif args.command == "digest":
         cmd_digest(args.scope, args.days, args.limit, args.format, args.output)
+    elif args.command == "brief":
+        cmd_brief(args.scope, args.days, args.limit, args.format, args.output)
     elif args.command == "add-scope":
         add_scope(args.scope, args.chat_ids)
         print(f"Added scope: {args.scope}")
