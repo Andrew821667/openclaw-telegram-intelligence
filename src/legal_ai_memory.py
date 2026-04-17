@@ -3,11 +3,20 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
 
 from common import get_db
 from chat_scopes import SCOPES, add_scope, add_to_scope, remove_from_scope, delete_scope
+
+
+STOPWORDS = {
+    "и", "в", "на", "с", "по", "для", "из", "что", "как", "это", "к",
+    "о", "об", "от", "до", "за", "под", "при", "или", "а", "но", "не",
+    "the", "and", "for", "with", "from", "that", "this", "into", "about",
+    "legal", "ai"
+}
 
 
 def normalize(text: str) -> str:
@@ -21,6 +30,17 @@ def looks_english(text: str) -> bool:
     latin = sum(1 for ch in sample if ("a" <= ch.lower() <= "z"))
     cyrillic = sum(1 for ch in sample if ("а" <= ch.lower() <= "я") or ch.lower() == "ё")
     return latin > cyrillic
+
+
+def tokenize(text: str) -> list[str]:
+    cleaned = []
+    for ch in (text or "").lower():
+        if ch.isalnum() or ch in ("_", "ё"):
+            cleaned.append(ch)
+        else:
+            cleaned.append(" ")
+    words = "".join(cleaned).split()
+    return [w for w in words if len(w) >= 4 and w not in STOPWORDS]
 
 
 def get_scope_chat_ids(scope: str) -> tuple[int, ...]:
@@ -179,6 +199,96 @@ def cmd_search(scope: str, query: str, days: int, limit: int, fmt: str, output: 
     emit_output(lines, output)
 
 
+def cmd_digest(scope: str, days: int, limit: int, fmt: str, output: str | None) -> None:
+    chat_ids = get_scope_chat_ids(scope)
+    conn = get_db()
+
+    since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    placeholders = ",".join("?" for _ in chat_ids)
+
+    sql = f"""
+        SELECT
+            c.title,
+            m.date_utc,
+            coalesce(m.text, '') as text
+        FROM tg_messages m
+        JOIN tg_chats c
+          ON c.chat_id = m.chat_id
+        WHERE m.chat_id IN ({placeholders})
+          AND m.date_utc >= ?
+        ORDER BY m.date_utc DESC
+        LIMIT 500
+    """
+
+    rows = conn.execute(sql, (*chat_ids, since)).fetchall()
+    conn.close()
+
+    lines: list[str] = []
+
+    if not rows:
+        emit_output(["Нет данных за указанный период."], output)
+        return
+
+    topic_counter = Counter()
+    chat_counter = Counter()
+    unique_previews: list[tuple[str, str, str]] = []
+    seen = set()
+
+    for title, date_utc, text in rows:
+        chat_counter[title] += 1
+        topic_counter.update(tokenize(text))
+
+        norm = " ".join((text or "").replace("\n", " ").split()).strip().lower()[:220]
+        if norm and norm not in seen:
+            seen.add(norm)
+            preview = " ".join((text or "").replace("\n", " ").split()).strip()[:280]
+            unique_previews.append((date_utc, title, preview))
+
+    if fmt == "markdown":
+        lines.append(f"# Digest for scope `{scope}`")
+        lines.append("")
+        lines.append(f"- Period: last {days} days")
+        lines.append(f"- Messages scanned: {len(rows)}")
+        lines.append("")
+        lines.append("## Top chats")
+        lines.append("")
+        for title, count in chat_counter.most_common(5):
+            lines.append(f"- {title}: {count}")
+        lines.append("")
+        lines.append("## Top topics")
+        lines.append("")
+        for word, count in topic_counter.most_common(12):
+            lines.append(f"- {word}: {count}")
+        lines.append("")
+        lines.append("## Key recent items")
+        lines.append("")
+        for date_utc, title, preview in unique_previews[:limit]:
+            lines.append(f"### [{date_utc}] {title}")
+            lines.append("")
+            lines.append(preview)
+            lines.append("")
+    else:
+        lines.append(f"Digest for scope: {scope}")
+        lines.append(f"Period: last {days} days")
+        lines.append(f"Messages scanned: {len(rows)}")
+        lines.append("")
+        lines.append("Top chats:")
+        for title, count in chat_counter.most_common(5):
+            lines.append(f"- {title}: {count}")
+        lines.append("")
+        lines.append("Top topics:")
+        for word, count in topic_counter.most_common(12):
+            lines.append(f"- {word}: {count}")
+        lines.append("")
+        lines.append("Key recent items:")
+        for date_utc, title, preview in unique_previews[:limit]:
+            lines.append(f"- [{date_utc}] {title}")
+            lines.append(f"  {preview}")
+            lines.append("")
+
+    emit_output(lines, output)
+
+
 def cmd_scopes() -> None:
     for name, chat_ids in SCOPES.items():
         print(f"{name}: {', '.join(str(x) for x in chat_ids)}")
@@ -233,6 +343,13 @@ def main() -> None:
     search_parser.add_argument("--format", choices=["terminal", "markdown"], default="terminal")
     search_parser.add_argument("--output")
 
+    digest_parser = subparsers.add_parser("digest")
+    digest_parser.add_argument("--scope", default="legal_ai")
+    digest_parser.add_argument("--days", type=int, default=14)
+    digest_parser.add_argument("--limit", type=int, default=5)
+    digest_parser.add_argument("--format", choices=["terminal", "markdown"], default="terminal")
+    digest_parser.add_argument("--output")
+
     add_scope_parser = subparsers.add_parser("add-scope")
     add_scope_parser.add_argument("--scope", required=True)
     add_scope_parser.add_argument("--chat-id", dest="chat_ids", action="append", type=int, required=True)
@@ -260,6 +377,8 @@ def main() -> None:
         cmd_summary(args.scope, args.days, args.limit, args.skip_english, args.format, args.output)
     elif args.command == "search":
         cmd_search(args.scope, args.query, args.days, args.limit, args.format, args.output)
+    elif args.command == "digest":
+        cmd_digest(args.scope, args.days, args.limit, args.format, args.output)
     elif args.command == "add-scope":
         add_scope(args.scope, args.chat_ids)
         print(f"Added scope: {args.scope}")
