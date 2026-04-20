@@ -1,60 +1,81 @@
 # openclaw-telegram-intelligence
 
-MVP локального Telegram intelligence / memory слоя для OpenClaw.
+Локальный Telegram intelligence / memory backend для OpenClaw.
 
-## Что уже умеет
-- авторизация через Telegram user-client
-- локальная SQLite база
-- синхронизация чатов и сообщений
-- полнотекстовый поиск
-- поиск по теме за период
-- dedup summary по Legal AI-контуру
+## Что делает проект
+Проект хранит и обслуживает Telegram-контуры памяти и внешних источников для OpenClaw-агентов.
 
-## Основные скрипты
-- `src/init_db.py` — инициализация БД
-- `src/list_dialog_filters.py` — чтение Telegram folders / filters
-- `src/sync_dialogs.py` — синк списка чатов
-- `src/sync_messages.py` — синк сообщений по одному чату
-- `src/sync_selected_chats.py` — синк набора чатов
-- `src/sync_legal_ai.py` — синк Legal AI-контура
-- `src/search_messages.py` — общий поиск
-- `src/search_messages_in_chat.py` — поиск внутри одного чата
-- `src/search_legal_ai_chats.py` — поиск по Legal AI-контуру
-- `src/search_legal_ai_topic_days.py` — поиск по теме за период
-- `src/summary_legal_ai_recent.py` — последние сообщения
-- `src/summary_legal_ai_dedup.py` — dedup summary
-- `src/summary_legal_ai_days.py` — summary за период
+Поддерживает:
+- scopes / контуры чатов
+- sync сообщений
+- brief / summary / search
+- legal-контуры для внешней правовой памяти
+- интеграцию с OpenClaw через локальные skills и exec bridge
 
-## Настройка
-Создать `.env` на основе `.env.example`.
+## Текущие контуры
 
-Пример:
-TG_API_ID=
-TG_API_HASH=
-TG_SESSION_NAME=main
-TG_DB_PATH=/Users/openclaw/telegram-memory/data/telegram_memory.sqlite3
+### Общие
+- `legal_ai` — legaltech / AI / рынок / новости
+- `legal_sources` — общий внешний правовой контур
 
-## Первый запуск
-1. Создать venv
-2. Установить зависимости
-3. Инициализировать БД
-4. Пройти Telegram login
-5. Синхронизировать чаты и сообщения
+### Специализированные legal-контуры
+- `legal_cases` — судебная практика
+- `legal_commentary` — комментарии, обсуждения и прикладные мнения юристов
+- `legal_law_updates` — изменения законодательства и правовые новинки
+- `legal_memory` — каркас под рабочую правовую память
 
-## Полезные команды
+## Интеграция с OpenClaw
 
-### Синк Legal AI-контура
-cd ~/telegram-memory && source .venv/bin/activate && unset TG_API_ID TG_API_HASH TG_SESSION_NAME TG_DB_PATH && python src/sync_legal_ai.py
+### Bots and agents
+- `assistant_bot -> assistant`
+- `legal_bot -> legal`
 
-### Поиск по теме за период
-cd ~/telegram-memory && source .venv/bin/activate && python src/search_legal_ai_topic_days.py --query "Harvey" --days 14 --limit 10
+### Skills
+#### Assistant
+- `shared_core`
+- `inbox_triage`
+- `telegram_memory_tool`
 
-### Dedup summary
-cd ~/telegram-memory && source .venv/bin/activate && python src/summary_legal_ai_dedup.py
+#### Legal
+- `shared_core`
+- `legal_risk_check`
+- `legal_sources_memory`
 
-## Важно
-В репозиторий не коммитятся:
-- `.env`
-- `data/telegram_memory.sqlite3`
-- session-файлы Telethon
-- логи
+### Как это работает
+OpenClaw-агенты используют локальный telegram-memory tool через `exec`.
+Это позволяет ботам:
+- строить brief по нужному контуру
+- искать по тематике
+- делать summary по источникам
+
+## Уже работающие сценарии
+Через `legal_bot` уже протестированы:
+- обзор судебной практики за период
+- обзор новинок законодательства
+- обзор комментариев и обсуждений юристов
+
+## Что хранится в репозитории
+- код логики scopes / sync / brief / summary / search
+- skills как исходники
+- документация по интеграции с OpenClaw
+- карта контуров
+
+## Что НЕ хранится в репозитории
+- bot tokens
+- `~/.openclaw/openclaw.json`
+- runtime sessions
+- logs
+- live message databases
+- локальные секреты
+
+## Документация
+Смотри:
+- `docs/openclaw-integration/SCOPES_MAP.md`
+- `docs/openclaw-integration/OPENCLAW_INTEGRATION_MAP.md`
+- `docs/openclaw-integration/BOOTSTRAP_OPENCLAW.md`
+
+## Следующий этап
+Следующее развитие проекта:
+- общий модуль `channel_discovery`
+- registry найденных и одобренных каналов
+- дальнейшая подготовка к export / vector / RAG layer
